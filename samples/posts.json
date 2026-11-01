@@ -1,0 +1,5 @@
+[
+  {"id":"hybrid-search","title":"Hybrid retrieval","author":"demo-editor","body":"Dense embeddings find passages with related meaning even when wording differs. BM25 finds exact terms, product codes, and names. Reciprocal rank fusion combines the two result lists by rank. A cross-encoder then scores each query and candidate passage together."},
+  {"id":"source-integrity","title":"Source integrity","author":"demo-editor","body":"An ingestion endpoint accepts posts only from allowlisted authors. Each indexed chunk carries a SHA-256 digest of its canonical local post. Retrieval re-reads the post and compares the digest before showing the chunk to a language model. Updating or deleting a post invalidates older chunks immediately."},
+  {"id":"grounded-answers","title":"Grounded answers","author":"demo-editor","body":"A grounded answer uses retrieved passages as evidence and cites their numbered sources. If no verified passage exists, the assistant says it lacks enough evidence. Model output is checked for valid citation numbers before the API returns it."}
+]

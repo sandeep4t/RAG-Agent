@@ -1,0 +1,11 @@
+.env
+.venv/
+.uv-cache/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+data/posts/
+data/qdrant/
+models/
+!.gitkeep
