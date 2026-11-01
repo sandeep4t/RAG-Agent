@@ -33,11 +33,28 @@ A search embeds the query, runs two Qdrant prefetches, merges them with RRF, ver
 
 ## Quick start: local API
 
+Create `.env` from the example. On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
+
 ```bash
 cp .env.example .env
-# Replace RAG_WRITE_KEY with a long random value before accepting writes.
-docker compose up -d qdrant ollama
-docker compose exec ollama ollama pull llama3.2:3b
+```
+
+Edit `.env` and replace `RAG_WRITE_KEY` with a long random value before starting the API. Then start Qdrant:
+
+```bash
+docker compose up -d qdrant
+```
+
+Choose **one** Ollama setup:
+
+- If Ollama is already installed and running locally, use `ollama pull llama3.2:3b`.
+- Otherwise run `docker compose up -d ollama`, then `docker compose exec ollama ollama pull llama3.2:3b`.
+
+Starting the Compose Ollama service while a local Ollama already uses port `11434` will fail. If you prefer an installed model shown by `ollama list` (or `docker compose exec ollama ollama list`), set `RAG_OLLAMA_MODEL` in `.env` to that model name. The API must be restarted after changing `.env`.
+
+Install the API and seed the sample posts:
+
+```bash
 python -m venv .venv
 # Activate .venv using your shell's normal activation command.
 python -m pip install -e ".[dev]"
@@ -45,25 +62,49 @@ python scripts/seed.py
 uvicorn secure_rag.api:app --host 127.0.0.1 --port 8000
 ```
 
-On Windows PowerShell, use `Copy-Item .env.example .env`, then `.venv\Scripts\Activate.ps1`. Open `http://127.0.0.1:8000/docs` for the interactive API. The first seed or query downloads local embedding/reranker models and may take several minutes. `scripts/seed.py` is safe to rerun; it replaces the same sample posts.
+On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`. The first seed or query downloads local embedding/reranker models and may take several minutes. `scripts/seed.py` is safe to rerun; it replaces the same sample posts.
 
 Open `http://127.0.0.1:8000/` for the chat interface. Ask a question, switch between **Answer** and **Insights**, and open the numbered citations to inspect the exact source passages. The browser does not receive the write key. Conversations remain in the current page only; each question is answered independently from the post index. The API documentation remains at `/docs`.
-
-If Ollama is already running on your machine, start only Qdrant with `docker compose up -d qdrant` and use the existing Ollama service. Set `RAG_OLLAMA_MODEL` to a model shown by `ollama list`, or pull the default model.
 
 For a containerized API instead, run `docker compose --profile full up -d --build` after setting `.env`, pull the Ollama model as above, then run `docker compose --profile full exec api python scripts/seed.py`. Containerized API startup downloads models into the persistent `models_data` volume.
 
 ## Try it
 
-```bash
-curl -X POST http://127.0.0.1:8000/search -H "Content-Type: application/json" -d '{"query":"Why combine dense search and BM25?"}'
-curl -X POST http://127.0.0.1:8000/answer -H "Content-Type: application/json" -d '{"query":"How is an indexed post verified?"}'
-curl -X POST http://127.0.0.1:8000/insights -H "Content-Type: application/json" -d '{"query":"What are the main retrieval and integrity lessons?"}'
-curl -X PUT http://127.0.0.1:8000/posts/new-post -H "Content-Type: application/json" -H "X-API-Key: YOUR_WRITE_KEY" -d '{"id":"new-post","title":"Example","author":"demo-editor","body":"A new example post."}'
-curl -X DELETE http://127.0.0.1:8000/posts/new-post -H "X-API-Key: YOUR_WRITE_KEY"
+Run these commands **from another terminal after the API starts**. First confirm `http://127.0.0.1:8000/health` returns `{"status":"ok"}`. Run `python scripts/seed.py` once to add the sample posts. For `/answer` and `/insights`, the configured Ollama model must be available (`ollama list` for local Ollama or `docker compose exec ollama ollama list` for the container). The first query may take a while while local models download.
+
+### Windows PowerShell
+
+```powershell
+$base = 'http://127.0.0.1:8000'
+Invoke-RestMethod "$base/health"
+
+$question = @{ query = 'Why combine dense search and BM25?' } | ConvertTo-Json
+Invoke-RestMethod "$base/search" -Method Post -ContentType 'application/json' -Body $question
+Invoke-RestMethod "$base/answer" -Method Post -ContentType 'application/json' -Body $question
+Invoke-RestMethod "$base/insights" -Method Post -ContentType 'application/json' -Body $question
+
+$writeKey = Read-Host 'Enter RAG_WRITE_KEY from .env'
+$headers = @{ 'X-API-Key' = $writeKey }
+$post = @{ id = 'new-post'; title = 'Example'; author = 'demo-editor'; body = 'A new example post.' } | ConvertTo-Json
+Invoke-RestMethod "$base/posts/new-post" -Method Put -ContentType 'application/json' -Headers $headers -Body $post
+Invoke-RestMethod "$base/posts/new-post" -Method Delete -Headers $headers
 ```
 
-PowerShell users can send the same requests through the Swagger page or `Invoke-RestMethod`. `PUT`, `DELETE`, and `/admin/reindex` require `X-API-Key`; reads do not. The server refuses writes when `RAG_WRITE_KEY` is empty. Change `RAG_ALLOWED_AUTHORS` to a comma-separated list to allow more post authors. `RAG_POSTS_DIR` must be writable by the API process.
+### Bash (macOS/Linux)
+
+```bash
+base=http://127.0.0.1:8000
+curl --fail-with-body -sS "$base/health"
+curl --fail-with-body -sS "$base/search" -H 'Content-Type: application/json' -d '{"query":"Why combine dense search and BM25?"}'
+curl --fail-with-body -sS "$base/answer" -H 'Content-Type: application/json' -d '{"query":"Why combine dense search and BM25?"}'
+curl --fail-with-body -sS "$base/insights" -H 'Content-Type: application/json' -d '{"query":"Why combine dense search and BM25?"}'
+
+read -rsp 'Enter RAG_WRITE_KEY from .env: ' write_key; printf '\n'
+curl --fail-with-body -sS -X PUT "$base/posts/new-post" -H 'Content-Type: application/json' -H "X-API-Key: $write_key" -d '{"id":"new-post","title":"Example","author":"demo-editor","body":"A new example post."}'
+curl --fail-with-body -sS -X DELETE "$base/posts/new-post" -H "X-API-Key: $write_key"
+```
+
+Replace the placeholder `RAG_WRITE_KEY` in `.env` with a real value **before starting or restarting the API**; enter that same value when prompted. A `401` means the key is missing or does not match the running API. A connection error means the API is not running at that address. If you use another Ollama model, set `RAG_OLLAMA_MODEL` in `.env` and restart the API. The `/docs` page is another way to try requests. `PUT`, `DELETE`, and `/admin/reindex` require `X-API-Key`; reads do not. Change `RAG_ALLOWED_AUTHORS` to a comma-separated list to allow more post authors. `RAG_POSTS_DIR` must be writable by the API process.
 
 ## Security model and limits
 
