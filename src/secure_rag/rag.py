@@ -183,13 +183,22 @@ class RagService:
             {"role": "user", "content": f"{task}: {question}\n\n<evidence>\n{evidence}\n</evidence>"},
         ]
         with httpx.Client(timeout=90) as http:
-            response = http.post(f"{self.settings.ollama_url}/api/chat", json={
-                "model": self.settings.ollama_model, "stream": False, "messages": messages,
-                "options": {"temperature": 0},
-            })
-            response.raise_for_status()
-        answer = response.json()["message"]["content"].strip()
-        cited = [int(number) for number in re.findall(r"\[(\d+)\]", answer)]
-        if not cited or any(number < 1 or number > len(sources) for number in cited):
-            return "I don't have enough verified evidence to answer.", []
-        return answer, sources
+            for attempt in range(2):
+                response = http.post(f"{self.settings.ollama_url}/api/chat", json={
+                    "model": self.settings.ollama_model, "stream": False, "messages": messages,
+                    "options": {"temperature": 0},
+                })
+                response.raise_for_status()
+                answer = response.json()["message"]["content"].strip()
+                cited = [int(number) for number in re.findall(r"\[(\d+)\]", answer)]
+                if cited and all(1 <= number <= len(sources) for number in cited):
+                    return answer, sources
+                if attempt == 0:
+                    messages.extend([
+                        {"role": "assistant", "content": answer},
+                        {"role": "user", "content": (
+                            "Rewrite the answer using only the numbered evidence. "
+                            "Put a citation in square brackets, such as [1], after every factual sentence. "
+                            "Do not cite a number outside the provided evidence.")},
+                    ])
+        return "I don't have enough verified evidence to answer.", []

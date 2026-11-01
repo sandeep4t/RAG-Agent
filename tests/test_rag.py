@@ -1,8 +1,9 @@
 from itertools import pairwise
 from types import SimpleNamespace
 
+import secure_rag.rag as rag_module
 from secure_rag.config import Settings
-from secure_rag.rag import RagService, chunks
+from secure_rag.rag import RagService, Source, chunks
 from secure_rag.security import Post, digest
 from secure_rag.store import PostStore
 
@@ -62,3 +63,34 @@ def test_chunk_overlap():
     post = Post(id="long", title="Title", author="demo-editor", body="x" * 30)
     pieces = chunks(post, size=20, overlap=5)
     assert all(previous[-5:] == following[:5] for previous, following in pairwise(pieces))
+
+
+def test_answer_retries_uncited_output(monkeypatch, tmp_path):
+    rag = RagService(Settings(posts_dir=tmp_path), PostStore(tmp_path), Client(), Embedder(), Reranker())
+    source = Source("post-one", "Title", "demo-editor", "Dense and BM25 complement each other.", 1.0)
+    monkeypatch.setattr(rag, "search", lambda query, limit=5: [source])
+
+    class FakeHttp:
+        calls = 0
+
+        def __init__(self, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, url, json):
+            self.calls += 1
+            answer = "Dense and BM25 complement each other."
+            if self.calls == 2:
+                answer += " [1]"
+            return SimpleNamespace(raise_for_status=lambda: None,
+                                   json=lambda: {"message": {"content": answer}})
+
+    monkeypatch.setattr(rag_module.httpx, "Client", FakeHttp)
+    answer, sources = rag.answer("Why combine them?")
+    assert answer.endswith("[1]")
+    assert sources == [source]
