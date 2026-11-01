@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0d1424">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'">
+    <title>Secure RAG · Ask your knowledge base</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="About this demo">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div><strong>Secure RAG</strong><small>LOCAL KNOWLEDGE AGENT</small></div>
+        </div>
+
+        <button id="new-chat" class="new-chat" type="button"><span aria-hidden="true">＋</span> New conversation</button>
+
+        <div class="sidebar-section">
+          <p class="eyebrow">START WITH A QUESTION</p>
+          <button class="suggestion" type="button" data-prompt="Why combine dense search and BM25?">Why combine dense search and BM25?<span aria-hidden="true">↗</span></button>
+          <button class="suggestion" type="button" data-prompt="How are indexed posts verified?">How are indexed posts verified?<span aria-hidden="true">↗</span></button>
+          <button class="suggestion" type="button" data-prompt="What makes an answer grounded?">What makes an answer grounded?<span aria-hidden="true">↗</span></button>
+        </div>
+
+        <div class="sidebar-bottom">
+          <div class="pipeline"><span class="pipeline-icon" aria-hidden="true">⌁</span><div><strong>Local by design</strong><p>Hybrid retrieval · Verified sources · Ollama answers</p></div></div>
+          <a href="/docs" class="api-link">Explore API docs <span aria-hidden="true">↗</span></a>
+        </div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div class="mobile-brand">Secure RAG</div>
+          <div class="topbar-title"><span class="topbar-icon" aria-hidden="true">✦</span><span>Knowledge chat</span><span class="topbar-divider"></span><span class="topbar-subtitle">Ask your indexed posts</span></div>
+          <div class="local-badge"><span></span> LOCAL DEMO</div>
+          <button id="mobile-new-chat" class="mobile-new-chat" type="button" aria-label="New conversation">＋</button>
+        </header>
+
+        <section id="conversation" class="conversation" aria-label="Conversation" aria-live="polite">
+          <div id="welcome" class="welcome">
+            <div class="welcome-glyph" aria-hidden="true"><span>✳</span></div>
+            <p class="eyebrow">YOUR KNOWLEDGE, IN CONTEXT</p>
+            <h1>Ask a better question.<br><em>Get a sourced answer.</em></h1>
+            <p class="welcome-copy">Search across your local posts with semantic and keyword retrieval. Every answer is grounded in verified source passages you can inspect.</p>
+            <div class="welcome-chips">
+              <button type="button" data-prompt="Why combine dense search and BM25?">Explore hybrid search <span aria-hidden="true">↗</span></button>
+              <button type="button" data-prompt="How do provenance checks prevent stale results?">Check provenance <span aria-hidden="true">↗</span></button>
+            </div>
+          </div>
+          <div id="messages" class="messages"></div>
+        </section>
+
+        <div class="composer-area">
+          <form id="question-form" class="composer">
+            <label for="question" class="sr-only">Your question</label>
+            <textarea id="question" name="question" rows="1" maxlength="1000" placeholder="Ask anything about your posts…" required></textarea>
+            <div class="composer-actions">
+              <div class="mode-control" role="group" aria-label="Response mode">
+                <button type="button" class="mode-button active" data-mode="answer" aria-pressed="true">Answer</button>
+                <button type="button" class="mode-button" data-mode="insights" aria-pressed="false">Insights</button>
+              </div>
+              <button id="send-button" class="send-button" type="submit" aria-label="Send question"><span aria-hidden="true">↑</span></button>
+            </div>
+          </form>
+          <p class="composer-note">Answers are generated from verified local sources. Check citations before relying on them.</p>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

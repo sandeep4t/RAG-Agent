@@ -94,3 +94,29 @@ def test_answer_retries_uncited_output(monkeypatch, tmp_path):
     answer, sources = rag.answer("Why combine them?")
     assert answer.endswith("[1]")
     assert sources == [source]
+
+
+def test_answer_quotes_verified_source_after_two_uncited_outputs(monkeypatch, tmp_path):
+    rag = RagService(Settings(posts_dir=tmp_path), PostStore(tmp_path), Client(), Embedder(), Reranker())
+    source = Source("post-one", "Title", "demo-editor", "Dense and BM25 complement each other.", 1.0)
+    monkeypatch.setattr(rag, "search", lambda query, limit=5: [source])
+
+    class FakeHttp:
+        def __init__(self, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, url, json):
+            return SimpleNamespace(raise_for_status=lambda: None,
+                                   json=lambda: {"message": {"content": "Uncited response"}})
+
+    monkeypatch.setattr(rag_module.httpx, "Client", FakeHttp)
+    answer, sources = rag.answer("Why combine them?")
+    assert source.text in answer
+    assert answer.endswith("[1]")
+    assert sources == [source]

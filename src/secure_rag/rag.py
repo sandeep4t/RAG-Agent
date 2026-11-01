@@ -201,4 +201,5 @@ class RagService:
                             "Put a citation in square brackets, such as [1], after every factual sentence. "
                             "Do not cite a number outside the provided evidence.")},
                     ])
-        return "I don't have enough verified evidence to answer.", []
+        return ("I couldn't generate a cited summary. The most relevant verified passage says:\n\n"
+                f"“{sources[0].text}” [1]"), sources[:1]

@@ -1,7 +1,10 @@
 import hmac
 from functools import lru_cache
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import get_settings
@@ -9,6 +12,13 @@ from .rag import RagService, Source
 from .security import Post, validate_post
 
 app = FastAPI(title="Secure Local RAG Demo", version="0.1.0")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def chat_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @lru_cache

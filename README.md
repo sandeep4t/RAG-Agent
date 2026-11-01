@@ -10,19 +10,20 @@ flowchart LR
     API --> Store[Canonical post files]
     API --> Embed[Local embedding model]
     Embed --> Q[(Qdrant: dense + BM25)]
-    Reader[Reader] --> API
+    Reader[Reader] --> Chat[Browser chat]
+    Chat --> API
     API --> Q
     Q --> Verify[Digest and source verification]
     Store --> Verify
     Verify --> Rank[Local cross-encoder reranker]
     Rank --> Ollama[Ollama]
     Ollama --> Cite[Citation check]
-    Cite --> Reader
+    Cite --> Chat
 ```
 
 Create or update a post through `PUT /posts/{id}`: the API validates it, writes its canonical JSON file atomically, chunks it, embeds each chunk locally, and indexes dense and BM25 representations in Qdrant. Delete removes the file first, then removes indexed points. A failed index operation returns `503`; run `POST /admin/reindex` to reconcile. This endpoint also clears orphaned index entries and rebuilds all existing posts. Use one API worker for this demo: concurrent writes to the same post are not serialized.
 
-A search embeds the query, runs two Qdrant prefetches, merges them with RRF, verifies every candidate against its current local post and digest, and reranks verified candidates with a cross-encoder. Answer and insight requests pass numbered evidence to Ollama and accept a response only when it cites valid source numbers. An uncited answer gets one corrective retry. No match, or a second uncited answer, produces an explicit insufficient-evidence response.
+A search embeds the query, runs two Qdrant prefetches, merges them with RRF, verifies every candidate against its current local post and digest, and reranks verified candidates with a cross-encoder. Answer and insight requests pass numbered evidence to Ollama and accept a response only when it cites valid source numbers. An uncited answer gets one corrective retry. If the retry is also uncited, the API quotes the top verified passage with its citation. With no verified match, it returns an insufficient-evidence response.
 
 ## Requirements
 
@@ -46,6 +47,8 @@ uvicorn secure_rag.api:app --host 127.0.0.1 --port 8000
 
 On Windows PowerShell, use `Copy-Item .env.example .env`, then `.venv\Scripts\Activate.ps1`. Open `http://127.0.0.1:8000/docs` for the interactive API. The first seed or query downloads local embedding/reranker models and may take several minutes. `scripts/seed.py` is safe to rerun; it replaces the same sample posts.
 
+Open `http://127.0.0.1:8000/` for the chat interface. Ask a question, switch between **Answer** and **Insights**, and open the numbered citations to inspect the exact source passages. The browser does not receive the write key. Conversations remain in the current page only; each question is answered independently from the post index. The API documentation remains at `/docs`.
+
 If Ollama is already running on your machine, start only Qdrant with `docker compose up -d qdrant` and use the existing Ollama service. Set `RAG_OLLAMA_MODEL` to a model shown by `ollama list`, or pull the default model.
 
 For a containerized API instead, run `docker compose --profile full up -d --build` after setting `.env`, pull the Ollama model as above, then run `docker compose --profile full exec api python scripts/seed.py`. Containerized API startup downloads models into the persistent `models_data` volume.
@@ -68,7 +71,7 @@ This is a **local demo**, not a hardened multi-user service. Keep the API, Qdran
 
 - **Trusted ingestion:** IDs are path-safe; author names must be allowlisted; posts have size limits; obvious instruction and exfiltration patterns are rejected. These patterns are illustrative and cannot catch every prompt injection.
 - **Provenance:** every chunk includes the canonical post digest. Retrieval re-reads the post and checks its ID, author, title, digest, chunk number, and exact text. Deleting or changing a post invalidates old search results immediately, even if Qdrant cleanup fails.
-- **Prompt boundary:** retrieved passages are treated as untrusted evidence, not instructions. Ollama is told to cite numbered sources; output with missing or nonexistent citation numbers is retried once, then rejected. This is a guardrail, not a proof that each claim is truly supported.
+- **Prompt boundary:** retrieved passages are treated as untrusted evidence, not instructions. Ollama is told to cite numbered sources; output with missing or nonexistent citation numbers is retried once, then replaced by an exact quote from the top verified source. This is a guardrail, not a proof that each claim is truly supported.
 - **Trust boundary:** anyone who can edit the canonical post directory, environment, or running services is trusted. Digest checks are consistency checks, not signatures. Protect that directory with OS permissions. There is no malware scanning, semantic claim verification, or model-level guarantee against indirect prompt injection.
 - **Operational limits:** indexing is synchronous and single-worker; Qdrant and the post filesystem do not share a transaction. Reindex after failures. For production, use a durable event/outbox queue, signed provenance, per-tenant authorization, monitoring, and an evaluation suite with adversarial documents.
 
