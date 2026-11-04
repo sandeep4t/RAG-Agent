@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     posts_dir: Path = Path("data/posts")
+    audit_db: Path = Path("data/audit/events.sqlite3")
     allowed_authors: str = "demo-editor"
     collection: str = "secure_posts_v1"
 

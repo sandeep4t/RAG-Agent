@@ -93,7 +93,10 @@ async function ask(question) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: prompt, limit: 5 }),
     });
-    if (!response.ok) throw new Error(`Request failed (${response.status}). Check that Qdrant and Ollama are running.`);
+    if (!response.ok) {
+      const requestId = response.headers.get("X-Request-ID");
+      throw new Error(`Request failed (${response.status}). Check that Qdrant and Ollama are running.${requestId ? ` Request ID: ${requestId}` : ""}`);
+    }
     const result = await response.json();
     thinking.remove();
     const cardsContainer = makeElement("div", "sources");

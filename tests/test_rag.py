@@ -55,6 +55,26 @@ def test_hybrid_retrieval_and_source_integrity(tmp_path):
     assert client.points[0].payload["digest"] == digest(post)
     store.put(post.model_copy(update={"body": "Changed content"}))
     assert rag.search("hybrid") == []
+
+
+def test_retrieval_reads_each_post_once_for_multiple_hits(tmp_path):
+    store = PostStore(tmp_path)
+    client = Client()
+    rag = RagService(Settings(posts_dir=tmp_path), store, client, Embedder(), Reranker())
+    post = Post(id="many-chunks", title="Hybrid", author="demo-editor", body="x" * 1200)
+    store.put(post)
+    rag.index(post)
+    calls = 0
+    original_get = store.get
+
+    def counted_get(post_id):
+        nonlocal calls
+        calls += 1
+        return original_get(post_id)
+
+    store.get = counted_get
+    assert len(rag.search("hybrid")) > 1
+    assert calls == 1
     store.delete(post.id)
     assert rag.search("hybrid") == []
 

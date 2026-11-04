@@ -8,6 +8,8 @@ A runnable teaching project for searching local posts and generating cited answe
 flowchart LR
     Editor[Authenticated editor] --> API[FastAPI]
     API --> Store[Canonical post files]
+    API --> Audit[(SQLite audit trail)]
+    API --> Metrics[Prometheus metrics]
     API --> Embed[Local embedding model]
     Embed --> Q[(Qdrant: dense + BM25)]
     Reader[Reader] --> Chat[Browser chat]
@@ -24,6 +26,8 @@ flowchart LR
 Create or update a post through `PUT /posts/{id}`: the API validates it, writes its canonical JSON file atomically, chunks it, embeds each chunk locally, and indexes dense and BM25 representations in Qdrant. Delete removes the file first, then removes indexed points. A failed index operation returns `503`; run `POST /admin/reindex` to reconcile. This endpoint also clears orphaned index entries and rebuilds all existing posts. Use one API worker for this demo: concurrent writes to the same post are not serialized.
 
 A search embeds the query, runs two Qdrant prefetches, merges them with RRF, verifies every candidate against its current local post and digest, and reranks verified candidates with a cross-encoder. Answer and insight requests pass numbered evidence to Ollama and accept a response only when it cites valid source numbers. An uncited answer gets one corrective retry. If the retry is also uncited, the API quotes the top verified passage with its citation. With no verified match, it returns an insufficient-evidence response.
+
+Retrieval reads, validates, and hashes each distinct post once per search, even when several candidate chunks come from that post. This avoids repeated disk access and hashing without weakening the chunk checks.
 
 ## Requirements
 
@@ -106,19 +110,37 @@ curl --fail-with-body -sS -X DELETE "$base/posts/new-post" -H "X-API-Key: $write
 
 Replace the placeholder `RAG_WRITE_KEY` in `.env` with a real value **before starting or restarting the API**; enter that same value when prompted. A `401` means the key is missing or does not match the running API. A connection error means the API is not running at that address. If you use another Ollama model, set `RAG_OLLAMA_MODEL` in `.env` and restart the API. The `/docs` page is another way to try requests. `PUT`, `DELETE`, and `/admin/reindex` require `X-API-Key`; reads do not. Change `RAG_ALLOWED_AUTHORS` to a comma-separated list to allow more post authors. `RAG_POSTS_DIR` must be writable by the API process.
 
+## Performance and observability
+
+Every HTTP request gets an `X-Request-ID` response header. The API writes a matching record to `RAG_AUDIT_DB` (default `data/audit/events.sqlite3`). Records include UTC time, method, path, status, duration, direct client IP, and request details. For `/search`, `/answer`, and `/insights`, details include the exact question and returned sources; answer and insight records also include the answer shown to the user. Post creation or update records include the submitted post and digest. Deletion and reindex operations record their IDs or counts. Authentication failures, validation errors, page loads, and other HTTP requests are recorded with status and request metadata. API keys and other request headers are never written to the audit database. Validation failures cannot include parsed request content.
+
+To inspect recent events:
+
+```bash
+python scripts/audit_report.py --limit 20
+# Containerized API:
+docker compose --profile full exec api python scripts/audit_report.py --limit 20
+```
+
+The audit file is ignored by Git and kept in the `audit_data` Docker volume for the containerized API. **It contains user questions, answers, source passages, and editor posts:** restrict filesystem and backup access, set a retention policy, and protect any exported report. This is a local, mutable audit trail, not tamper-proof logging. Readers are anonymous; a shared write key identifies only that key, not an individual editor. Add user authentication and a managed audit sink before exposing the service to multiple users.
+
+`GET /metrics` exposes Prometheus-format request counts, request-duration histograms, answer outcomes, and stage-duration histograms for embedding, Qdrant hybrid search, source verification, reranking, post embedding, model loading, and each Ollama generation attempt. Labels use fixed stage names and route templates, not questions, post IDs, or other high-cardinality values. Check it with `curl http://127.0.0.1:8000/metrics` (or `Invoke-RestMethod "$base/metrics"` in PowerShell). It is unauthenticated, so keep it on localhost or protect it at a reverse proxy. Metrics reset when the API restarts; the audit database persists.
+
+For a slow question, compare `rag_stage_duration_seconds` across stages and `rag_http_request_duration_seconds` for `/answer` or `/insights`. First use downloads and loads the embedding and reranking models; these are measured separately. Ollama generation time depends heavily on the selected model and hardware, and an uncited answer can trigger a second generation pass. Use a smaller local model if generation dominates. Model choice and hardware matter more than the per-post verification optimization for many workloads. The demo still indexes synchronously and runs with one API worker; production systems should move indexing to a durable queue, set latency targets, and benchmark with realistic post volumes.
+
 ## Security model and limits
 
-This is a **local demo**, not a hardened multi-user service. Keep the API, Qdrant, and Ollama bound to localhost or a trusted network. The API key protects post mutations, but the read endpoints are public to anyone who can reach the API. If you expose it, add authentication, rate limits, TLS, audit logging, and a proper identity system.
+This is a **local demo**, not a hardened multi-user service. Keep the API, Qdrant, and Ollama bound to localhost or a trusted network. The API key protects post mutations, but the read endpoints are public to anyone who can reach the API. If you expose it, add authentication, rate limits, TLS, central audit retention, and a proper identity system.
 
 - **Trusted ingestion:** IDs are path-safe; author names must be allowlisted; posts have size limits; obvious instruction and exfiltration patterns are rejected. These patterns are illustrative and cannot catch every prompt injection.
 - **Provenance:** every chunk includes the canonical post digest. Retrieval re-reads the post and checks its ID, author, title, digest, chunk number, and exact text. Deleting or changing a post invalidates old search results immediately, even if Qdrant cleanup fails.
 - **Prompt boundary:** retrieved passages are treated as untrusted evidence, not instructions. Ollama is told to cite numbered sources; output with missing or nonexistent citation numbers is retried once, then replaced by an exact quote from the top verified source. This is a guardrail, not a proof that each claim is truly supported.
 - **Trust boundary:** anyone who can edit the canonical post directory, environment, or running services is trusted. Digest checks are consistency checks, not signatures. Protect that directory with OS permissions. There is no malware scanning, semantic claim verification, or model-level guarantee against indirect prompt injection.
-- **Operational limits:** indexing is synchronous and single-worker; Qdrant and the post filesystem do not share a transaction. Reindex after failures. For production, use a durable event/outbox queue, signed provenance, per-tenant authorization, monitoring, and an evaluation suite with adversarial documents.
+- **Operational limits:** indexing is synchronous and single-worker; Qdrant and the post filesystem do not share a transaction. Reindex after failures. The local audit database has no built-in retention, cross-process coordination, or tamper protection. For production, use a durable event/outbox queue, signed provenance, per-tenant authorization, a managed audit sink, monitoring, and an evaluation suite with adversarial documents.
 
 ## Configuration and tests
 
-See [`.env.example`](.env.example) for all settings. The collection name is fixed in code; if you change the embedding model dimension, use a new collection name or delete the old collection and reindex. No API key or post data is committed: `.env`, `data/posts/`, downloaded models, and local Qdrant data are ignored.
+See [`.env.example`](.env.example) for all settings. The collection name is fixed in code; if you change the embedding model dimension, use a new collection name or delete the old collection and reindex. No API key or post data is committed: `.env`, `data/posts/`, `data/audit/`, downloaded models, and local Qdrant data are ignored.
 
 ```bash
 pytest -q

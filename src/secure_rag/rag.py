@@ -1,13 +1,25 @@
 import re
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import httpx
 from qdrant_client import QdrantClient, models
 
 from .config import Settings
+from .metrics import ANSWER_OUTCOMES, STAGE_SECONDS
 from .security import Post, digest, validate_post
 from .store import PostStore
+
+
+@contextmanager
+def timed(stage: str):
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        STAGE_SECONDS.labels(stage=stage).observe(time.perf_counter() - started)
 
 
 def chunks(post: Post, size: int = 800, overlap: int = 100) -> list[str]:
@@ -46,7 +58,8 @@ class RagService:
         if self._embedder is None:
             from sentence_transformers import SentenceTransformer
 
-            self._embedder = SentenceTransformer(self.settings.embed_model)
+            with timed("embedding_model_load"):
+                self._embedder = SentenceTransformer(self.settings.embed_model)
         return self._embedder
 
     @property
@@ -54,7 +67,8 @@ class RagService:
         if self._reranker is None:
             from sentence_transformers import CrossEncoder
 
-            self._reranker = CrossEncoder(self.settings.rerank_model)
+            with timed("reranker_model_load"):
+                self._reranker = CrossEncoder(self.settings.rerank_model)
         return self._reranker
 
     def ensure_collection(self) -> None:
@@ -86,12 +100,14 @@ class RagService:
         validate_post(post, self.settings.authors)
         self.ensure_collection()
         pieces = chunks(post)
-        vectors = self.embedder.encode(pieces).tolist()
+        with timed("post_embedding"):
+            vectors = self.embedder.encode(pieces).tolist()
+        post_digest = digest(post)
         points = [models.PointStruct(
             id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"secure-rag/{post.id}/{number}")),
             vector={"dense": vector, "bm25": models.Document(text=piece, model="Qdrant/bm25")},
             payload={"post_id": post.id, "title": post.title, "author": post.author,
-                     "digest": digest(post), "chunk": number, "text": piece},
+                     "digest": post_digest, "chunk": number, "text": piece},
         ) for number, (piece, vector) in enumerate(zip(pieces, vectors))]
         self._delete_points(post.id)
         self.client.upsert(collection_name=self.settings.collection, points=points, wait=True)
@@ -123,46 +139,55 @@ class RagService:
 
     def search(self, query: str, limit: int = 5) -> list[Source]:
         self.ensure_collection()
-        dense = self.embedder.encode(query).tolist()
-        result = self.client.query_points(
-            collection_name=self.settings.collection,
-            prefetch=[
-                models.Prefetch(query=dense, using="dense", limit=20),
-                models.Prefetch(query=models.Document(text=query, model="Qdrant/bm25"),
-                                using="bm25", limit=20),
-            ],
-            query=models.FusionQuery(fusion=models.Fusion.RRF),
-            limit=20, with_payload=True,
-        )
+        with timed("query_embedding"):
+            dense = self.embedder.encode(query).tolist()
+        with timed("qdrant_hybrid_search"):
+            result = self.client.query_points(
+                collection_name=self.settings.collection,
+                prefetch=[
+                    models.Prefetch(query=dense, using="dense", limit=20),
+                    models.Prefetch(query=models.Document(text=query, model="Qdrant/bm25"),
+                                    using="bm25", limit=20),
+                ],
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                limit=20, with_payload=True,
+            )
         verified = []
-        for hit in result.points:
-            payload = hit.payload or {}
-            post_id = payload.get("post_id")
-            if not isinstance(post_id, str):
-                continue
-            try:
-                post = self.store.get(post_id)
-            except (ValueError, OSError):
-                continue
-            if (post is None or post.id != post_id or post.author not in self.settings.authors
-                    or payload.get("digest") != digest(post)
-                    or payload.get("author") != post.author
-                    or payload.get("title") != post.title):
-                continue
-            try:
-                validate_post(post, self.settings.authors)
-            except ValueError:
-                continue
-            number = payload.get("chunk")
-            pieces = chunks(post)
-            if not isinstance(number, int) or not 0 <= number < len(pieces):
-                continue
-            if payload.get("text") != pieces[number]:
-                continue
-            verified.append(Source(post.id, post.title, post.author, pieces[number], hit.score))
+        prepared: dict[str, tuple[Post, str, list[str]] | None] = {}
+        with timed("source_verification"):
+            for hit in result.points:
+                payload = hit.payload or {}
+                post_id = payload.get("post_id")
+                if not isinstance(post_id, str):
+                    continue
+                if post_id not in prepared:
+                    try:
+                        post = self.store.get(post_id)
+                        if post is not None and post.id == post_id:
+                            validate_post(post, self.settings.authors)
+                            prepared[post_id] = (post, digest(post), chunks(post))
+                        else:
+                            prepared[post_id] = None
+                    except (ValueError, OSError):
+                        prepared[post_id] = None
+                item = prepared[post_id]
+                if item is None:
+                    continue
+                post, post_digest, pieces = item
+                if (payload.get("digest") != post_digest
+                        or payload.get("author") != post.author
+                        or payload.get("title") != post.title):
+                    continue
+                number = payload.get("chunk")
+                if not isinstance(number, int) or not 0 <= number < len(pieces):
+                    continue
+                if payload.get("text") != pieces[number]:
+                    continue
+                verified.append(Source(post.id, post.title, post.author, pieces[number], hit.score))
         if not verified:
             return []
-        scores = self.reranker.predict([(query, source.text) for source in verified])
+        with timed("cross_encoder_rerank"):
+            scores = self.reranker.predict([(query, source.text) for source in verified])
         for source, score in zip(verified, scores):
             source.score = float(score)
         return sorted(verified, key=lambda source: source.score, reverse=True)[:limit]
@@ -170,6 +195,7 @@ class RagService:
     def answer(self, question: str, insight: bool = False, limit: int = 5) -> tuple[str, list[Source]]:
         sources = self.search(question, limit)
         if not sources:
+            ANSWER_OUTCOMES.labels(outcome="insufficient_evidence").inc()
             return "I don't have enough verified evidence to answer.", []
         evidence = "\n\n".join(f"[{number}] {source.title} ({source.post_id})\n{source.text}"
                                for number, source in enumerate(sources, 1))
@@ -184,14 +210,16 @@ class RagService:
         ]
         with httpx.Client(timeout=90) as http:
             for attempt in range(2):
-                response = http.post(f"{self.settings.ollama_url}/api/chat", json={
-                    "model": self.settings.ollama_model, "stream": False, "messages": messages,
-                    "options": {"temperature": 0},
-                })
-                response.raise_for_status()
+                with timed("ollama_generation"):
+                    response = http.post(f"{self.settings.ollama_url}/api/chat", json={
+                        "model": self.settings.ollama_model, "stream": False, "messages": messages,
+                        "options": {"temperature": 0},
+                    })
+                    response.raise_for_status()
                 answer = response.json()["message"]["content"].strip()
                 cited = [int(number) for number in re.findall(r"\[(\d+)\]", answer)]
                 if cited and all(1 <= number <= len(sources) for number in cited):
+                    ANSWER_OUTCOMES.labels(outcome="cited_answer").inc()
                     return answer, sources
                 if attempt == 0:
                     messages.extend([
@@ -201,5 +229,6 @@ class RagService:
                             "Put a citation in square brackets, such as [1], after every factual sentence. "
                             "Do not cite a number outside the provided evidence.")},
                     ])
+        ANSWER_OUTCOMES.labels(outcome="citation_fallback").inc()
         return ("I couldn't generate a cited summary. The most relevant verified passage says:\n\n"
                 f"“{sources[0].text}” [1]"), sources[:1]
