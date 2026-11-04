@@ -19,13 +19,17 @@ services:
       RAG_QDRANT_URL: http://qdrant:6333
       RAG_OLLAMA_URL: http://ollama:11434
       RAG_POSTS_DIR: /app/data/posts
-      RAG_AUDIT_DB: /app/data/audit/events.sqlite3
+      RAG_AUDIT_DB: /app/data/audit/events-v2.sqlite3
+      RAG_API_KEYS_FILE: /app/data/api_keys.json
+      RAG_AUDIT_KEY_FILE: /app/data/audit.key
       HF_HOME: /app/models
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - posts_data:/app/data/posts
       - audit_data:/app/data/audit
+      - ./data/api_keys.json:/app/data/api_keys.json:ro
+      - ./data/audit.key:/app/data/audit.key:ro
       - models_data:/app/models
     depends_on: [qdrant, ollama]
 volumes:

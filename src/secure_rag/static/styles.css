@@ -18,7 +18,7 @@ body {
   min-height:100vh
 }
 
-button,textarea {
+button,textarea,input {
   font:inherit
 }
 
@@ -262,6 +262,25 @@ a {
   font-size:9px;
   font-weight:800;
   letter-spacing:.12em
+}
+
+.access-key-label {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  color:#a8b6cb;
+  font-size:11px;
+  margin-left:auto;
+  margin-right:14px
+}
+
+.access-key-label input {
+  width:150px;
+  padding:8px;
+  border:1px solid #40516a;
+  border-radius:7px;
+  background:#111d30;
+  color:#e9edf7
 }
 
 .local-badge span {
@@ -731,7 +750,16 @@ a {
   }
 
   .local-badge {
-    font-size:8px
+    display:none
+  }
+
+  .access-key-label {
+    margin-left:auto;
+    margin-right:12px
+  }
+
+  .access-key-label input {
+    width:130px
   }
 
   .composer-area {

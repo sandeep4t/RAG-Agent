@@ -7,14 +7,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="RAG_", env_file=".env", extra="ignore")
 
-    write_key: str = ""
+    api_keys_file: Path = Path("data/api_keys.json")
+    audit_key_file: Path = Path("data/audit.key")
     qdrant_url: str = "http://127.0.0.1:6333"
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2:3b"
     embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     posts_dir: Path = Path("data/posts")
-    audit_db: Path = Path("data/audit/events.sqlite3")
+    audit_db: Path = Path("data/audit/events-v2.sqlite3")
     allowed_authors: str = "demo-editor"
     collection: str = "secure_posts_v1"
 

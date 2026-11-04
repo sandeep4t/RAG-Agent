@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import secure_rag.rag as rag_module
 from secure_rag.config import Settings
-from secure_rag.rag import RagService, Source, chunks
+from secure_rag.rag import RagService, Source, chunks, verified_quotes
 from secure_rag.security import Post, digest
 from secure_rag.store import PostStore
 
@@ -50,7 +50,10 @@ def test_hybrid_retrieval_and_source_integrity(tmp_path):
     post = Post(id="post-one", title="Hybrid", author="demo-editor", body="Dense and BM25 search")
     store.put(post)
     rag.index(post)
-    assert rag.search("hybrid")[0].post_id == post.id
+    trace = {}
+    assert rag.search("hybrid", trace=trace)[0].post_id == post.id
+    assert trace["retrieval"]["candidates"][0]["verified"]
+    assert trace["retrieval"]["candidates"][0]["rerank_score"] is not None
     assert len(client.last_query["prefetch"]) == 2
     assert client.points[0].payload["digest"] == digest(post)
     store.put(post.model_copy(update={"body": "Changed content"}))
@@ -85,10 +88,10 @@ def test_chunk_overlap():
     assert all(previous[-5:] == following[:5] for previous, following in pairwise(pieces))
 
 
-def test_answer_retries_uncited_output(monkeypatch, tmp_path):
+def test_answer_retries_unsupported_output(monkeypatch, tmp_path):
     rag = RagService(Settings(posts_dir=tmp_path), PostStore(tmp_path), Client(), Embedder(), Reranker())
     source = Source("post-one", "Title", "demo-editor", "Dense and BM25 complement each other.", 1.0)
-    monkeypatch.setattr(rag, "search", lambda query, limit=5: [source])
+    monkeypatch.setattr(rag, "search", lambda query, limit=5, trace=None: [source])
 
     class FakeHttp:
         calls = 0
@@ -104,22 +107,29 @@ def test_answer_retries_uncited_output(monkeypatch, tmp_path):
 
         def post(self, url, json):
             self.calls += 1
-            answer = "Dense and BM25 complement each other."
+            answer = "Dense and BM25 complement each other [1]. The moon is made of cheese."
             if self.calls == 2:
-                answer += " [1]"
+                answer = ('{"passages":[{"source":1,"quote":'
+                          '"Dense and BM25 complement each other."}]}')
             return SimpleNamespace(raise_for_status=lambda: None,
-                                   json=lambda: {"message": {"content": answer}})
+                                   json=lambda: {"model": "test-model", "message": {"content": answer}})
 
     monkeypatch.setattr(rag_module.httpx, "Client", FakeHttp)
-    answer, sources = rag.answer("Why combine them?")
+    trace = {}
+    answer, sources = rag.answer("Why combine them?", trace=trace)
     assert answer.endswith("[1]")
+    assert "moon" not in answer
     assert sources == [source]
+    assert len(trace["generation"]["attempts"]) == 2
+    assert not trace["generation"]["attempts"][0]["accepted"]
+    assert trace["generation"]["attempts"][1]["model"] == "test-model"
+    assert trace["outcome"] == "verified_quotes"
 
 
 def test_answer_quotes_verified_source_after_two_uncited_outputs(monkeypatch, tmp_path):
     rag = RagService(Settings(posts_dir=tmp_path), PostStore(tmp_path), Client(), Embedder(), Reranker())
     source = Source("post-one", "Title", "demo-editor", "Dense and BM25 complement each other.", 1.0)
-    monkeypatch.setattr(rag, "search", lambda query, limit=5: [source])
+    monkeypatch.setattr(rag, "search", lambda query, limit=5, trace=None: [source])
 
     class FakeHttp:
         def __init__(self, timeout):
@@ -140,3 +150,12 @@ def test_answer_quotes_verified_source_after_two_uncited_outputs(monkeypatch, tm
     assert source.text in answer
     assert answer.endswith("[1]")
     assert sources == [source]
+
+
+def test_quote_validation_rejects_extra_claims_even_with_valid_citation():
+    source = Source("one", "Title", "demo-editor", "Dense and BM25 complement each other.", 1)
+    assert verified_quotes("Dense and BM25 complement each other [1]. Moon is cheese.",
+                           [source]) is None
+    assert verified_quotes('{"passages":[{"source":1,"quote":"Dense and BM25 "'
+                           '"complement each other."}],"claim":"Moon is cheese"}',
+                           [source]) is None

@@ -6,26 +6,26 @@ A runnable teaching project for searching local posts and generating cited answe
 
 ```mermaid
 flowchart LR
-    Editor[Authenticated editor] --> API[FastAPI]
+    Editor[Named editor key] --> API[FastAPI]
     API --> Store[Canonical post files]
     API --> Audit[(SQLite audit trail)]
     API --> Metrics[Prometheus metrics]
     API --> Embed[Local embedding model]
     Embed --> Q[(Qdrant: dense + BM25)]
-    Reader[Reader] --> Chat[Browser chat]
+    Reader[Named reader key] --> Chat[Browser chat]
     Chat --> API
     API --> Q
     Q --> Verify[Digest and source verification]
     Store --> Verify
     Verify --> Rank[Local cross-encoder reranker]
     Rank --> Ollama[Ollama]
-    Ollama --> Cite[Citation check]
-    Cite --> Chat
+    Ollama --> Quotes[Exact quote validation]
+    Quotes --> Chat
 ```
 
 Create or update a post through `PUT /posts/{id}`: the API validates it, writes its canonical JSON file atomically, chunks it, embeds each chunk locally, and indexes dense and BM25 representations in Qdrant. Delete removes the file first, then removes indexed points. A failed index operation returns `503`; run `POST /admin/reindex` to reconcile. This endpoint also clears orphaned index entries and rebuilds all existing posts. Use one API worker for this demo: concurrent writes to the same post are not serialized.
 
-A search embeds the query, runs two Qdrant prefetches, merges them with RRF, verifies every candidate against its current local post and digest, and reranks verified candidates with a cross-encoder. Answer and insight requests pass numbered evidence to Ollama and accept a response only when it cites valid source numbers. An uncited answer gets one corrective retry. If the retry is also uncited, the API quotes the top verified passage with its citation. With no verified match, it returns an insufficient-evidence response.
+A search embeds the query, runs two Qdrant prefetches, merges them with RRF, verifies candidates against their current local post and digest, and reranks verified candidates with a cross-encoder. The audit trace snapshots all fused candidates (up to 40), their payloads and scores, which 20 were considered for reranking, and the final sources. Answer and insight requests ask Ollama to select exact excerpts. The server accepts only strict JSON containing verbatim substrings of the cited, verified passages. It retries an invalid model output once, then quotes the top verified passage. With no verified match, it returns an insufficient-evidence response. This sacrifices free-form synthesis to prevent unsupported model prose from reaching the user; an exact quote can still reflect an inaccurate or malicious source.
 
 Retrieval reads, validates, and hashes each distinct post once per search, even when several candidate chunks come from that post. This avoids repeated disk access and hashing without weakening the chunk checks.
 
@@ -43,7 +43,13 @@ Create `.env` from the example. On Windows PowerShell, use `Copy-Item .env.examp
 cp .env.example .env
 ```
 
-Edit `.env` and replace `RAG_WRITE_KEY` with a long random value before starting the API. Then start Qdrant:
+Create individual reader/editor keys and a separate audit signing key before starting the API:
+
+```bash
+python scripts/setup_security.py
+```
+
+This creates ignored files `data/api_keys.json` and `data/audit.key`. Keep them private and backed up. Each person needs their own entry in the key file; restart the API after editing it. An editor's post `author` must match their authenticated ID and be in `RAG_ALLOWED_AUTHORS`. Do not commit either file. Then start Qdrant:
 
 ```bash
 docker compose up -d qdrant
@@ -68,9 +74,9 @@ uvicorn secure_rag.api:app --host 127.0.0.1 --port 8000
 
 On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`. The first seed or query downloads local embedding/reranker models and may take several minutes. `scripts/seed.py` is safe to rerun; it replaces the same sample posts.
 
-Open `http://127.0.0.1:8000/` for the chat interface. Ask a question, switch between **Answer** and **Insights**, and open the numbered citations to inspect the exact source passages. The browser does not receive the write key. Conversations remain in the current page only; each question is answered independently from the post index. The API documentation remains at `/docs`.
+Open `http://127.0.0.1:8000/` for the chat interface. Enter your personal reader or editor key in the access-key field, then ask a question. The key stays in page memory and is sent only with API calls; a page reload clears it. Switch between **Answer** and **Insights** and open the numbered citations to inspect source passages. Conversations remain in the current page only; each question is answered independently. The API documentation remains at `/docs`.
 
-For a containerized API instead, run `docker compose --profile full up -d --build` after setting `.env`, pull the Ollama model as above, then run `docker compose --profile full exec api python scripts/seed.py`. Containerized API startup downloads models into the persistent `models_data` volume.
+For a containerized API instead, run `docker compose --profile full up -d --build` after creating `.env` and the security files, pull the Ollama model as above, then run `docker compose --profile full exec api python scripts/seed.py`. Containerized API startup downloads models into the persistent `models_data` volume. The security files are mounted read-only; the audit database and anchor persist in `audit_data`.
 
 ## Try it
 
@@ -81,14 +87,16 @@ Run these commands **from another terminal after the API starts**. First confirm
 ```powershell
 $base = 'http://127.0.0.1:8000'
 Invoke-RestMethod "$base/health"
+$readerKey = Read-Host 'Enter your reader key from data/api_keys.json'
+$readerHeaders = @{ 'X-API-Key' = $readerKey }
 
 $question = @{ query = 'Why combine dense search and BM25?' } | ConvertTo-Json
-Invoke-RestMethod "$base/search" -Method Post -ContentType 'application/json' -Body $question
-Invoke-RestMethod "$base/answer" -Method Post -ContentType 'application/json' -Body $question
-Invoke-RestMethod "$base/insights" -Method Post -ContentType 'application/json' -Body $question
+Invoke-RestMethod "$base/search" -Method Post -ContentType 'application/json' -Headers $readerHeaders -Body $question
+Invoke-RestMethod "$base/answer" -Method Post -ContentType 'application/json' -Headers $readerHeaders -Body $question
+Invoke-RestMethod "$base/insights" -Method Post -ContentType 'application/json' -Headers $readerHeaders -Body $question
 
-$writeKey = Read-Host 'Enter RAG_WRITE_KEY from .env'
-$headers = @{ 'X-API-Key' = $writeKey }
+$editorKey = Read-Host 'Enter your editor key from data/api_keys.json'
+$headers = @{ 'X-API-Key' = $editorKey }
 $post = @{ id = 'new-post'; title = 'Example'; author = 'demo-editor'; body = 'A new example post.' } | ConvertTo-Json
 Invoke-RestMethod "$base/posts/new-post" -Method Put -ContentType 'application/json' -Headers $headers -Body $post
 Invoke-RestMethod "$base/posts/new-post" -Method Delete -Headers $headers
@@ -99,48 +107,54 @@ Invoke-RestMethod "$base/posts/new-post" -Method Delete -Headers $headers
 ```bash
 base=http://127.0.0.1:8000
 curl --fail-with-body -sS "$base/health"
-curl --fail-with-body -sS "$base/search" -H 'Content-Type: application/json' -d '{"query":"Why combine dense search and BM25?"}'
-curl --fail-with-body -sS "$base/answer" -H 'Content-Type: application/json' -d '{"query":"Why combine dense search and BM25?"}'
-curl --fail-with-body -sS "$base/insights" -H 'Content-Type: application/json' -d '{"query":"Why combine dense search and BM25?"}'
+read -rsp 'Enter reader key from data/api_keys.json: ' reader_key; printf '\n'
+curl --fail-with-body -sS "$base/search" -H 'Content-Type: application/json' -H "X-API-Key: $reader_key" -d '{"query":"Why combine dense search and BM25?"}'
+curl --fail-with-body -sS "$base/answer" -H 'Content-Type: application/json' -H "X-API-Key: $reader_key" -d '{"query":"Why combine dense search and BM25?"}'
+curl --fail-with-body -sS "$base/insights" -H 'Content-Type: application/json' -H "X-API-Key: $reader_key" -d '{"query":"Why combine dense search and BM25?"}'
 
-read -rsp 'Enter RAG_WRITE_KEY from .env: ' write_key; printf '\n'
-curl --fail-with-body -sS -X PUT "$base/posts/new-post" -H 'Content-Type: application/json' -H "X-API-Key: $write_key" -d '{"id":"new-post","title":"Example","author":"demo-editor","body":"A new example post."}'
-curl --fail-with-body -sS -X DELETE "$base/posts/new-post" -H "X-API-Key: $write_key"
+read -rsp 'Enter editor key from data/api_keys.json: ' editor_key; printf '\n'
+curl --fail-with-body -sS -X PUT "$base/posts/new-post" -H 'Content-Type: application/json' -H "X-API-Key: $editor_key" -d '{"id":"new-post","title":"Example","author":"demo-editor","body":"A new example post."}'
+curl --fail-with-body -sS -X DELETE "$base/posts/new-post" -H "X-API-Key: $editor_key"
 ```
 
-Replace the placeholder `RAG_WRITE_KEY` in `.env` with a real value **before starting or restarting the API**; enter that same value when prompted. A `401` means the key is missing or does not match the running API. A connection error means the API is not running at that address. If you use another Ollama model, set `RAG_OLLAMA_MODEL` in `.env` and restart the API. The `/docs` page is another way to try requests. `PUT`, `DELETE`, and `/admin/reindex` require `X-API-Key`; reads do not. Change `RAG_ALLOWED_AUTHORS` to a comma-separated list to allow more post authors. `RAG_POSTS_DIR` must be writable by the API process.
+A `401` means the key is missing or invalid; `403` means a reader key was used for an editor operation. A connection error means the API is not running at that address. If you use another Ollama model, set `RAG_OLLAMA_MODEL` in `.env` and restart the API. `PUT`, `DELETE`, and `/admin/reindex` require an editor key; `/search`, `/answer`, and `/insights` accept reader or editor keys. Health, metrics, and static assets are public on the bound interface. Change `RAG_ALLOWED_AUTHORS` to a comma-separated list to allow more post authors. `RAG_POSTS_DIR` must be writable by the API process.
 
 ## Performance and observability
 
-Every HTTP request gets an `X-Request-ID` response header. The API writes a matching record to `RAG_AUDIT_DB` (default `data/audit/events.sqlite3`). Records include UTC time, method, path, status, duration, direct client IP, and request details. For `/search`, `/answer`, and `/insights`, details include the exact question and returned sources; answer and insight records also include the answer shown to the user. Post creation or update records include the submitted post and digest. Deletion and reindex operations record their IDs or counts. Authentication failures, validation errors, page loads, and other HTTP requests are recorded with status and request metadata. API keys and other request headers are never written to the audit database. Validation failures cannot include parsed request content.
+The API processes a request only after writing a durable `start` event. A post creation, deletion, or reindex gets an additional `intent` event **before** canonical files or the index change. The API buffers the response until its `complete` event commits; if audit writing fails, it returns `503` instead of a success response. A mutation can still occur before a completion failure, but its intent remains recorded. The `X-Request-ID` header links a response to all its events. An in-flight crash may leave a start or intent without a completion; this is evidence of an unfinished request, not proof of success.
+
+Events in `RAG_AUDIT_DB` (default `data/audit/events-v2.sqlite3`) include UTC time, method, path, status, duration, direct client IP, named actor, and request details. Questions and displayed answers/sources are recorded. The trace includes retrieval settings, model names and client-library versions, all fused candidates and their payloads, verification and reranking decisions, exact prompts, raw model outputs, and validation outcomes. Editor intents include the submitted post or target ID. Authentication failures and validation errors are recorded with request metadata; invalid bodies cannot always be parsed. API key headers are never stored.
+
+Each event is linked to the previous event with an HMAC-SHA256 computed using the separate `data/audit.key` file. A head anchor beside the database detects edits and removal of the final row when the anchor remains intact. The API verifies the chain on startup and after external database changes. An integrity failure stops request handling. Verify the entire chain and inspect recent events with:
 
 To inspect recent events:
 
 ```bash
 python scripts/audit_report.py --limit 20
+python scripts/audit_report.py --verify-only
 # Containerized API:
 docker compose --profile full exec api python scripts/audit_report.py --limit 20
 ```
 
-The audit file is ignored by Git and kept in the `audit_data` Docker volume for the containerized API. **It contains user questions, answers, source passages, and editor posts:** restrict filesystem and backup access, set a retention policy, and protect any exported report. This is a local, mutable audit trail, not tamper-proof logging. Readers are anonymous; a shared write key identifies only that key, not an individual editor. Add user authentication and a managed audit sink before exposing the service to multiple users.
+The database and anchor are ignored by Git and kept in the `audit_data` Docker volume. **They contain user questions, answers, source passages, candidate payloads, raw model outputs, and editor posts:** restrict access, set a retention policy, and protect exported reports. The HMAC detects edits by someone who can change SQLite but cannot access the signing key. It does **not** prove who used a key, prevent key sharing, survive compromise of the signing key, or defeat rollback of both database and anchor to a previously valid pair. For stronger enterprise evidence, anchor heads in an independent append-only service. Existing `events.sqlite3` logs are legacy and cannot be retroactively verified; the new chain starts in `events-v2.sqlite3`.
 
 `GET /metrics` exposes Prometheus-format request counts, request-duration histograms, answer outcomes, and stage-duration histograms for embedding, Qdrant hybrid search, source verification, reranking, post embedding, model loading, and each Ollama generation attempt. Labels use fixed stage names and route templates, not questions, post IDs, or other high-cardinality values. Check it with `curl http://127.0.0.1:8000/metrics` (or `Invoke-RestMethod "$base/metrics"` in PowerShell). It is unauthenticated, so keep it on localhost or protect it at a reverse proxy. Metrics reset when the API restarts; the audit database persists.
 
-For a slow question, compare `rag_stage_duration_seconds` across stages and `rag_http_request_duration_seconds` for `/answer` or `/insights`. First use downloads and loads the embedding and reranking models; these are measured separately. Ollama generation time depends heavily on the selected model and hardware, and an uncited answer can trigger a second generation pass. Use a smaller local model if generation dominates. Model choice and hardware matter more than the per-post verification optimization for many workloads. The demo still indexes synchronously and runs with one API worker; production systems should move indexing to a durable queue, set latency targets, and benchmark with realistic post volumes.
+For a slow question, compare `rag_stage_duration_seconds` across stages and `rag_http_request_duration_seconds` for `/answer` or `/insights`. First use downloads and loads the embedding and reranking models; these are measured separately. Ollama generation time depends heavily on the selected model and hardware, and an invalid selection can trigger a second generation pass. Use a smaller local model if generation dominates. The demo still indexes synchronously and runs with one API worker; response buffering and durable audit writes add latency. Production systems should move indexing to a durable queue, set latency targets, and benchmark with realistic post volumes.
 
 ## Security model and limits
 
-This is a **local demo**, not a hardened multi-user service. Keep the API, Qdrant, and Ollama bound to localhost or a trusted network. The API key protects post mutations, but the read endpoints are public to anyone who can reach the API. If you expose it, add authentication, rate limits, TLS, central audit retention, and a proper identity system.
+This is a **local demo**, not a hardened multi-user service. Keep the API, Qdrant, and Ollama bound to localhost or a trusted network. Reader and editor keys give named attribution but are bearer credentials; anyone with a copied key can impersonate its owner. If you expose it, add an identity provider, rate limits, TLS, central audit retention, and independently stored audit anchors.
 
 - **Trusted ingestion:** IDs are path-safe; author names must be allowlisted; posts have size limits; obvious instruction and exfiltration patterns are rejected. These patterns are illustrative and cannot catch every prompt injection.
 - **Provenance:** every chunk includes the canonical post digest. Retrieval re-reads the post and checks its ID, author, title, digest, chunk number, and exact text. Deleting or changing a post invalidates old search results immediately, even if Qdrant cleanup fails.
-- **Prompt boundary:** retrieved passages are treated as untrusted evidence, not instructions. Ollama is told to cite numbered sources; output with missing or nonexistent citation numbers is retried once, then replaced by an exact quote from the top verified source. This is a guardrail, not a proof that each claim is truly supported.
+- **Prompt boundary:** retrieved passages are treated as untrusted evidence, not instructions. Ollama selects exact excerpts in a strict JSON shape; the API rejects any additional prose, changed quote, or invalid source number. This proves only that displayed factual text occurs in the cited verified passage. It does not prove that the passage itself is true or relevant.
 - **Trust boundary:** anyone who can edit the canonical post directory, environment, or running services is trusted. Digest checks are consistency checks, not signatures. Protect that directory with OS permissions. There is no malware scanning, semantic claim verification, or model-level guarantee against indirect prompt injection.
-- **Operational limits:** indexing is synchronous and single-worker; Qdrant and the post filesystem do not share a transaction. Reindex after failures. The local audit database has no built-in retention, cross-process coordination, or tamper protection. For production, use a durable event/outbox queue, signed provenance, per-tenant authorization, a managed audit sink, monitoring, and an evaluation suite with adversarial documents.
+- **Operational limits:** indexing is synchronous and single-worker; Qdrant and the post filesystem do not share a transaction. Reindex after failures. Audit has no built-in retention or independently anchored head. Model tags can change; the trace records configured names, response model tags and library versions, but exact weight digests are not pinned for deterministic replay. For production, use a durable event/outbox queue, pinned model artifacts, signed provenance, per-tenant authorization, a managed audit sink, monitoring, and adversarial evaluations.
 
 ## Configuration and tests
 
-See [`.env.example`](.env.example) for all settings. The collection name is fixed in code; if you change the embedding model dimension, use a new collection name or delete the old collection and reindex. No API key or post data is committed: `.env`, `data/posts/`, `data/audit/`, downloaded models, and local Qdrant data are ignored.
+See [`.env.example`](.env.example) for all settings. The collection name is fixed in code; if you change the embedding model dimension, use a new collection name or delete the old collection and reindex. No API key or post data is committed: `.env`, `data/api_keys.json`, `data/audit.key`, `data/posts/`, `data/audit/`, downloaded models, and local Qdrant data are ignored.
 
 ```bash
 pytest -q

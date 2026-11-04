@@ -4,6 +4,7 @@ const sendButton = document.querySelector("#send-button");
 const messages = document.querySelector("#messages");
 const welcome = document.querySelector("#welcome");
 const conversation = document.querySelector("#conversation");
+const accessKey = document.querySelector("#access-key");
 let mode = "answer";
 let busy = false;
 
@@ -88,9 +89,11 @@ async function ask(question) {
   for (let index = 0; index < 3; index += 1) thinking.append(makeElement("span"));
   responseBody.append(thinking);
   try {
+    const key = accessKey.value.trim();
+    if (!key) throw new Error("Enter your personal access key above before asking.");
     const response = await fetch(responseMode === "insights" ? "/insights" : "/answer", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-API-Key": key },
       body: JSON.stringify({ query: prompt, limit: 5 }),
     });
     if (!response.ok) {

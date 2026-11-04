@@ -8,6 +8,8 @@ __pycache__/
 *.pyc
 data/posts/
 data/audit/
+data/api_keys.json
+data/audit.key
 data/qdrant/
 models/
 !.gitkeep
